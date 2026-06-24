@@ -413,6 +413,34 @@ def _fmt_num(val_str):
         return val_str
 
 
+def empty_feature_collection():
+    return {"type": "FeatureCollection", "features": []}
+
+
+def filter_landslides_df(df, filters):
+    filters = set(filters or [])
+    out = df.copy()
+
+    if "active" in filters:
+        if COL_STOP_A and COL_STOP_A in out.columns:
+            active = pd.to_numeric(out[COL_STOP_A], errors="coerce").fillna(0) > 0
+            out = out[active]
+        else:
+            out = out.iloc[0:0]
+
+    if "monitoring" in filters:
+        if COL_MON and COL_MON in out.columns:
+            mon = out[COL_MON].fillna("").astype(str).str.strip().str.rstrip(".,").str.upper()
+            out = out[(mon != "") & (mon != "NIE")]
+        else:
+            out = out.iloc[0:0]
+
+    if "forest50" in filters:
+        out = out[pd.to_numeric(out["forest_pct"], errors="coerce").fillna(0) >= 50]
+
+    return out
+
+
 def make_landslide_item(i, row):
     area_ha = float(row.get("area_m2") or 0) / 10000
     forest_pct = int(row.get("forest_pct") or 0)
@@ -421,12 +449,12 @@ def make_landslide_item(i, row):
     mon_clean = mon.strip().rstrip(".,").upper() if mon else ""
     mon_badge = html.Span()
     if mon and mon_clean not in ("NIE", ""):
-        mon_badge = html.Span("M", title=mon, style={
+        mon_badge = html.Span("M", title=f"Monitoring: {mon}", style={
             "background": "#e67e00", "color": "#fff", "borderRadius": "3px",
             "padding": "0 3px", "fontSize": "10px", "fontWeight": "bold", "cursor": "help",
         })
 
-    def dot(color, col):
+    def dot(color, col, title):
         v = _val(row, col)
         if not v:
             return html.Span()
@@ -438,6 +466,7 @@ def make_landslide_item(i, row):
             return html.Span()
         return html.Span(
             [html.Span("●", style={"color": color, "fontSize": "20px", "lineHeight": "10px"}), f"{pct}%"],
+            title=f"{title}: {pct}%",
             style={"fontSize": "10px", "marginRight": "3px", "whiteSpace": "nowrap"},
         )
 
@@ -445,19 +474,22 @@ def make_landslide_item(i, row):
 
     r1 = html.Div([
         html.Span(f"{area_ha:.2f} ha",
+                  title="Powierzchnia osuwiska",
                   style={"fontWeight": "bold", "fontSize": "12px", "flex": "1"}),
         html.Span(f"🌲{forest_pct}%",
+                  title=f"Udział powierzchni leśnej: {forest_pct}%",
                   style={"fontSize": "10px", "color": "#2d6a2d", "marginRight": "3px"}),
         mon_badge,
     ], style={"display": "flex", "alignItems": "center", "gap": "2px"})
 
     r2 = html.Div([
         html.Div([
-            dot("#27ae60", COL_STOP_A),
-            dot("#e67e00", COL_STOP_O),
-            dot("#c0392b", COL_STOP_N),
+            dot("#27ae60", COL_STOP_A, "Obszar aktywny"),
+            dot("#e67e00", COL_STOP_O, "Obszar okresowo aktywny"),
+            dot("#c0392b", COL_STOP_N, "Obszar nieaktywny"),
         ], style={"display": "flex", "flex": "1"}),
         html.Span([ko, " 📏"] if ko else "",
+                  title="Miąższość koluwiów" if ko else None,
                   style={"fontSize": "10px", "color": "#555"}),
     ], style={"display": "flex", "alignItems": "center"})
 
@@ -541,6 +573,8 @@ def make_storey_table(df):
         for col, _ in disp:
             v = row.get(col)
             s = "" if (v is None or str(v) in ("nan", "None", "<NA>")) else str(v)
+            if col == "species_age" and s:
+                s = _fmt_num(s)
             tds.append(html.Td(s, style={"fontSize": "10px", "padding": "2px 5px",
                                           "borderBottom": "1px solid #eee"}))
         body.append(html.Tr(tds))
@@ -586,6 +620,18 @@ def left_panel():
         dcc.Dropdown(id="nadl-dropdown", options=[], placeholder="Wybierz…", clearable=True,
                      style={"borderRadius": "0", "fontSize": "13px", "flexShrink": "0"}),
         ph("Osuwiska"),
+        dcc.Checklist(
+            id="landslide-filters",
+            options=[
+                {"label": "aktywne", "value": "active"},
+                {"label": "monitoring", "value": "monitoring"},
+                {"label": ">=50% las", "value": "forest50"},
+            ],
+            value=[],
+            inputStyle={"marginRight": "4px"},
+            labelStyle={"display": "block", "fontSize": "11px", "lineHeight": "16px"},
+            style={"padding": "5px 8px", "borderBottom": "1px solid #e8e8e8", "flexShrink": "0"},
+        ),
         html.Div(id="landslide-list",
                  style={"overflowY": "auto", "flex": "1", "padding": "2px 0"}),
     ], style={**PANEL, "width": "200px", "minWidth": "200px", "maxWidth": "200px"})
@@ -605,11 +651,18 @@ def map_panel():
         ),
         dl.BaseLayer(
             dl.WMSTileLayer(
-                url="https://mapy.geoportal.gov.pl/wss/service/img/guest/ISOK_NMPN/MapServer/WmsServer",
+                url="https://mapy.geoportal.gov.pl/wss/service/PZGIK/NMT/GRID1/WMS/ShadedRelief",
                 layers="Raster", format="image/png", transparent=False,
                 attribution="© GUGiK ISOK",
             ),
             name="ISOK Cieniowanie",
+        ),
+        dl.BaseLayer(
+            dl.TileLayer(
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
+                attribution="Tiles © Esri",
+            ),
+            name="Esri World Hillshade",
         ),
     ]
     overlays = [
@@ -747,24 +800,42 @@ def load_options(_):
     Output("geojson-landslides", "data"),
     Output("store-nadl-data", "data"),
     Output("geojson-zoom", "data", allow_duplicate=True),
+    Output("geojson-subareas", "data", allow_duplicate=True),
+    Output("geojson-subarea-border", "data", allow_duplicate=True),
+    Output("store-landslide", "data", allow_duplicate=True),
+    Output("subarea-attrs", "children", allow_duplicate=True),
+    Output("storey-table", "children", allow_duplicate=True),
+    Output("store-subarea", "data", allow_duplicate=True),
     Input("nadl-dropdown", "value"),
+    Input("landslide-filters", "value"),
     prevent_initial_call=True,
 )
-def on_nadl_selected(nadl_name):
-    none5 = ([], None, None, None, no_update)
+def on_nadl_selected(nadl_name, filters):
+    e_attrs = html.Div("Wybierz osuwisko.",
+                       style={"color": "#888", "fontStyle": "italic", "padding": "8px"})
+    e_storey = html.Div("Kliknij wydzielenie na mapie.",
+                        style={"color": "#888", "fontStyle": "italic", "padding": "8px"})
+    none11 = ([], None, empty_feature_collection(), None, no_update,
+              None, None, None, e_attrs, e_storey, None)
     if not nadl_name:
-        return none5
+        return none11
     try:
         insp  = get_inspectorate_geojson(nadl_name)
         df    = get_landslides(nadl_name)
         nadl_bbox = get_nadl_bbox(nadl_name)
     except Exception as e:
         print(f"[on_nadl_selected] {e}")
-        return none5
+        return none11
+
+    df = filter_landslides_df(df, filters)
+    zoom_data = bbox_to_geojson_rect(*nadl_bbox, padding=0.05) if nadl_bbox else no_update
 
     if df.empty:
-        msg = html.Div("Brak osuwisk.", style={"color": "#888", "padding": "8px", "fontStyle": "italic"})
-        return msg, insp, None, None, no_update
+        msg = html.Div("Brak osuwisk dla wybranych filtrów.",
+                       style={"color": "#888", "padding": "8px", "fontStyle": "italic"})
+        store = {"nadl_name": nadl_name, "gids": [], "bboxes": []}
+        return (msg, insp, empty_feature_collection(), store, zoom_data,
+                None, None, None, e_attrs, e_storey, None)
 
     items  = [make_landslide_item(i, row) for i, (_, row) in enumerate(df.iterrows())]
     bboxes = [
@@ -774,10 +845,8 @@ def on_nadl_selected(nadl_name):
     store  = {"nadl_name": nadl_name, "gids": df["gid"].tolist(), "bboxes": bboxes}
     l_json = landslides_to_geojson(df)
 
-    # zoom to nadleśnictwo bbox
-    zoom_data = bbox_to_geojson_rect(*nadl_bbox, padding=0.05) if nadl_bbox else no_update
-
-    return items, insp, l_json, store, zoom_data
+    return (items, insp, l_json, store, zoom_data,
+            None, None, None, e_attrs, e_storey, None)
 
 
 @app.callback(
