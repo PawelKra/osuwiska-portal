@@ -1,0 +1,45 @@
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-osuwiska}
+      POSTGRES_USER: ${POSTGRES_USER:-osuwiska}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-osuwiska_pass}
+    volumes:
+      - ./db_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-osuwiska} -d ${POSTGRES_DB:-osuwiska}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - internal
+    restart: unless-stopped
+
+  dash:
+    build:
+      context: ./docker/dash
+    ports:
+      - "8999:8999"
+    volumes:
+      - ./app:/app
+      - ./dane:/dane:ro
+      - ./scripts:/scripts:ro
+    environment:
+      DB_HOST: postgis
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-osuwiska}
+      DB_USER: ${POSTGRES_USER:-osuwiska}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-osuwiska_pass}
+    depends_on:
+      postgis:
+        condition: service_healthy
+    command: python /app/app.py
+    networks:
+      - internal
+    restart: unless-stopped
+
+networks:
+  internal:
+    driver: bridge

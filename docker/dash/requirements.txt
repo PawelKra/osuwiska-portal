@@ -1,0 +1,12 @@
+dash==2.18.1
+dash-leaflet==1.0.15
+plotly==5.22.0
+pandas==2.2.2
+numpy==1.26.4
+geopandas==1.0.1
+fiona==1.9.6
+shapely==2.0.4
+pyproj==3.6.1
+geoalchemy2==0.15.1
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.30
