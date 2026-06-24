@@ -165,6 +165,36 @@ def get_landslides(nadl_name):
         return pd.read_sql(sql, conn, params={"nadl": nadl_name})
 
 
+def get_landslide_details(landslide_gid, nadl_name):
+    opt_parts = [f'o."{c}"' for c in filter(None, [COL_AREA, COL_MON, COL_STOP_A, COL_STOP_O, COL_STOP_N, COL_MIAZSZ])]
+    opt_select = (", " + ", ".join(opt_parts)) if opt_parts else ""
+
+    sql = text(f"""
+        SELECT
+            o.gid
+            {opt_select},
+            ST_Area(o.geometry)                           AS area_m2,
+            ST_XMin(ST_Transform(o.geometry, 4326))      AS xmin,
+            ST_YMin(ST_Transform(o.geometry, 4326))      AS ymin,
+            ST_XMax(ST_Transform(o.geometry, 4326))      AS xmax,
+            ST_YMax(ST_Transform(o.geometry, 4326))      AS ymax,
+            COALESCE((
+                SELECT ROUND(
+                    SUM(ST_Area(ST_Intersection(o.geometry, s.geometry))) /
+                    NULLIF(ST_Area(o.geometry), 0) * 100
+                )::int
+                FROM g_subarea s
+                WHERE ST_Intersects(o.geometry, s.geometry)
+                  AND s.nadlesnictwo_name = :nadl
+            ), 0) AS forest_pct
+        FROM osuwiska_pl o
+        WHERE o.gid = :gid
+        LIMIT 1
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn, params={"gid": int(landslide_gid), "nadl": nadl_name})
+
+
 def get_landslide_at_point(lat, lng, nadl_name):
     sql = text("""
         WITH pt AS (
@@ -284,7 +314,7 @@ def get_storey_species(a_i_num):
         return pd.read_sql(sql, conn, params={"anum": int(a_i_num)})
 
 
-def bbox_to_geojson_rect(ymin, xmin, ymax, xmax, padding=0.0):
+def bbox_to_geojson_rect(ymin, xmin, ymax, xmax, padding=0.0, token=None):
     """Padded bounding-box rectangle as a minimal GeoJSON — used for zoomToBounds."""
     dy = (ymax - ymin) * padding / 2
     dx = (xmax - xmin) * padding / 2
@@ -297,7 +327,7 @@ def bbox_to_geojson_rect(ymin, xmin, ymax, xmax, padding=0.0):
         "type": "FeatureCollection",
         "features": [{"type": "Feature",
                        "geometry": {"type": "Polygon", "coordinates": coords},
-                       "properties": {}}],
+                       "properties": {"token": token} if token is not None else {}}],
     }
 
 
@@ -500,6 +530,77 @@ def make_landslide_item(i, row):
                            "paddingRight": "18px",
                            "borderBottom": "1px solid #e8e8e8",
                            "cursor": "pointer"})
+
+
+def make_landslide_map_info(row):
+    area_ha = float(row.get("area_m2") or 0) / 10000
+    forest_pct = int(row.get("forest_pct") or 0)
+    ko = _fmt_num(_val(row, COL_MIAZSZ))
+    mon = _val(row, COL_MON)
+    mon_clean = mon.strip().rstrip(".,").upper() if mon else ""
+
+    def pct(col):
+        v = _val(row, col)
+        if not v:
+            return 0
+        try:
+            return int(float(v))
+        except Exception:
+            return 0
+
+    status_items = [
+        ("#27ae60", "Aktywne", pct(COL_STOP_A)),
+        ("#e67e00", "Okresowe", pct(COL_STOP_O)),
+        ("#c0392b", "Nieaktywne", pct(COL_STOP_N)),
+    ]
+    status = [
+        html.Span([
+            html.Span("●", style={"color": color, "fontSize": "14px", "lineHeight": "10px"}),
+            f" {label} {value}%",
+        ], title=f"{label}: {value}%", style={"whiteSpace": "nowrap"})
+        for color, label, value in status_items if value
+    ]
+
+    rows = [
+        html.Div([
+            html.Span("Powierzchnia", style={"color": "#666"}),
+            html.Span(f"{area_ha:.2f} ha", style={"fontWeight": "bold"}),
+        ], style={"display": "flex", "justifyContent": "space-between", "gap": "12px"}),
+        html.Div([
+            html.Span("Las", style={"color": "#666"}),
+            html.Span(f"{forest_pct}%", style={"fontWeight": "bold", "color": "#2d6a2d"}),
+        ], style={"display": "flex", "justifyContent": "space-between", "gap": "12px"}),
+    ]
+    if ko:
+        rows.append(html.Div([
+            html.Span("Miąższość", style={"color": "#666"}),
+            html.Span(ko, style={"fontWeight": "bold"}),
+        ], style={"display": "flex", "justifyContent": "space-between", "gap": "12px"}))
+    if mon and mon_clean not in ("NIE", ""):
+        rows.append(html.Div([
+            html.Span("Monitoring", style={"color": "#666"}),
+            html.Span(mon, style={"fontWeight": "bold"}),
+        ], style={"display": "flex", "justifyContent": "space-between", "gap": "12px"}))
+
+    return html.Div([
+        html.Div(f"Osuwisko {int(row.get('gid'))}", style={
+            "fontWeight": "bold", "fontSize": "12px", "marginBottom": "4px",
+            "borderBottom": "1px solid #e4e4e4", "paddingBottom": "3px",
+        }),
+        html.Div(rows, style={"display": "grid", "gap": "2px"}),
+        html.Div(status, style={"display": "flex", "flexWrap": "wrap", "gap": "6px",
+                                "marginTop": "5px", "fontSize": "10px"}),
+    ], style={
+        "background": "rgba(255,255,255,0.94)",
+        "boxShadow": "0 1px 5px rgba(0,0,0,0.28)",
+        "border": "1px solid rgba(0,0,0,0.12)",
+        "borderRadius": "4px",
+        "padding": "7px 9px",
+        "minWidth": "190px",
+        "maxWidth": "260px",
+        "fontSize": "11px",
+        "lineHeight": "1.35",
+    })
 
 
 SUBAREA_LABELS = {
@@ -710,7 +811,14 @@ def map_panel():
             ],
             style={"height": "100%", "width": "100%"},
         ),
-    ], style={**PANEL, "flex": "1", "minWidth": "0"})
+        html.Div(id="landslide-map-info", style={
+            "position": "absolute",
+            "right": "10px",
+            "bottom": "28px",
+            "zIndex": 1000,
+            "pointerEvents": "auto",
+        }),
+    ], style={**PANEL, "flex": "1", "minWidth": "0", "position": "relative"})
 
 
 def right_panel():
@@ -795,6 +903,23 @@ def load_options(_):
 
 
 @app.callback(
+    Output("landslide-map-info", "children"),
+    Input("store-landslide", "data"),
+)
+def update_landslide_map_info(landslide_data):
+    if not landslide_data or not landslide_data.get("gid") or not landslide_data.get("nadl_name"):
+        return []
+    try:
+        df = get_landslide_details(landslide_data["gid"], landslide_data["nadl_name"])
+    except Exception as e:
+        print(f"[update_landslide_map_info] {e}", flush=True)
+        return []
+    if df.empty:
+        return []
+    return make_landslide_map_info(df.iloc[0])
+
+
+@app.callback(
     Output("landslide-list", "children"),
     Output("geojson-inspectorate", "data"),
     Output("geojson-landslides", "data"),
@@ -811,6 +936,7 @@ def load_options(_):
     prevent_initial_call=True,
 )
 def on_nadl_selected(nadl_name, filters):
+    triggered = ctx.triggered_id
     e_attrs = html.Div("Wybierz osuwisko.",
                        style={"color": "#888", "fontStyle": "italic", "padding": "8px"})
     e_storey = html.Div("Kliknij wydzielenie na mapie.",
@@ -828,7 +954,21 @@ def on_nadl_selected(nadl_name, filters):
         return none11
 
     df = filter_landslides_df(df, filters)
-    zoom_data = bbox_to_geojson_rect(*nadl_bbox, padding=0.05) if nadl_bbox else no_update
+    if triggered == "landslide-filters":
+        zoom_data = no_update
+    elif df.empty:
+        zoom_token = f"{nadl_name}|{','.join(sorted(filters or []))}|{len(df)}"
+        zoom_data = bbox_to_geojson_rect(*nadl_bbox, padding=0.05, token=zoom_token) if nadl_bbox else no_update
+    else:
+        zoom_token = f"{nadl_name}|{','.join(sorted(filters or []))}|{len(df)}"
+        zoom_data = bbox_to_geojson_rect(
+            float(df["ymin"].min()),
+            float(df["xmin"].min()),
+            float(df["ymax"].max()),
+            float(df["xmax"].max()),
+            padding=0.15,
+            token=zoom_token,
+        )
 
     if df.empty:
         msg = html.Div("Brak osuwisk dla wybranych filtrów.",
@@ -883,7 +1023,7 @@ def on_landslide_clicked(n_clicks_list, nadl_data):
     gid       = gids[idx]
     nadl_name = nadl_data["nadl_name"]
 
-    zoom_data = bbox_to_geojson_rect(*bboxes[idx], padding=0.2) if idx < len(bboxes) else nu
+    zoom_data = bbox_to_geojson_rect(*bboxes[idx], padding=0.2, token=f"landslide-{gid}") if idx < len(bboxes) else nu
 
     try:
         sub_df = get_subareas(gid, nadl_name)
@@ -897,7 +1037,7 @@ def on_landslide_clicked(n_clicks_list, nadl_data):
     if sub_df.empty:
         no_sub = html.Div("Brak wydzieleń leśnych na tym osuwisku.",
                           style={"color": "#888", "fontStyle": "italic"})
-        return None, None, {"gid": gid}, zoom_data, no_sub, html.Div()
+        return None, None, {"gid": gid, "nadl_name": nadl_name}, zoom_data, no_sub, html.Div()
 
     fill_data   = subareas_to_geojson(sub_df)
     border_data = subareas_to_border_geojson(sub_df)
@@ -999,6 +1139,7 @@ def on_subarea_clicked(subarea_click_data, map_click_data, nadl_data, landslide_
                         float(landslide["ymax"]),
                         float(landslide["xmax"]),
                         padding=0.2,
+                        token=f"landslide-{gid}",
                     )
                     store_landslide = {"gid": gid, "nadl_name": nadl_name}
 
