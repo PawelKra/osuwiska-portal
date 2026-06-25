@@ -866,6 +866,26 @@ HDR = {
     "padding": "6px 10px", "background": "#2d6a2d", "color": "#fff",
     "fontWeight": "bold", "fontSize": "12px", "flexShrink": "0",
 }
+LOADING_MODAL_HIDDEN = {"display": "none"}
+LOADING_MODAL_VISIBLE = {
+    "position": "absolute",
+    "left": "50%",
+    "top": "50%",
+    "transform": "translate(-50%, -50%)",
+    "zIndex": 2000,
+    "display": "flex",
+    "alignItems": "center",
+    "gap": "10px",
+    "padding": "14px 18px",
+    "background": "rgba(255,255,255,0.96)",
+    "border": "1px solid rgba(0,0,0,0.16)",
+    "boxShadow": "0 6px 24px rgba(0,0,0,0.24)",
+    "borderRadius": "6px",
+    "fontSize": "13px",
+    "fontWeight": "600",
+    "color": "#1a4a1a",
+    "pointerEvents": "none",
+}
 
 
 def ph(t):
@@ -890,8 +910,13 @@ def left_panel():
             labelStyle={"display": "block", "fontSize": "11px", "lineHeight": "16px"},
             style={"padding": "5px 8px", "borderBottom": "1px solid #e8e8e8", "flexShrink": "0"},
         ),
-        html.Div(id="landslide-list",
-                 style={"overflowY": "auto", "flex": "1", "padding": "2px 0"}),
+        dcc.Loading(
+            html.Div(id="landslide-list",
+                     style={"overflowY": "auto", "flex": "1", "padding": "2px 0"}),
+            type="circle",
+            color="#2d6a2d",
+            parent_style={"display": "flex", "flex": "1", "minHeight": "0"},
+        ),
     ], style={**PANEL, "width": "200px", "minWidth": "200px", "maxWidth": "200px"})
 
 
@@ -951,22 +976,27 @@ def map_panel():
         ),
     ]
     return html.Div([
-        dl.Map(
-            id="main-map",
-            center=[50.5, 20.0],
-            zoom=7,
-            children=[
-                dl.LayersControl(base + overlays, position="topright"),
-                dl.ScaleControl(position="bottomleft"),
-                dl.GeoJSON(
-                    id="geojson-zoom",
-                    data=None,
-                    zoomToBounds=True,
-                    interactive=False,
-                    options={"style": {"opacity": 0, "fillOpacity": 0}},
-                ),
-            ],
-            style={"height": "100%", "width": "100%"},
+        dcc.Loading(
+            dl.Map(
+                id="main-map",
+                center=[50.5, 20.0],
+                zoom=7,
+                children=[
+                    dl.LayersControl(base + overlays, position="topright"),
+                    dl.ScaleControl(position="bottomleft"),
+                    dl.GeoJSON(
+                        id="geojson-zoom",
+                        data=None,
+                        zoomToBounds=True,
+                        interactive=False,
+                        options={"style": {"opacity": 0, "fillOpacity": 0}},
+                    ),
+                ],
+                style={"height": "100%", "width": "100%"},
+            ),
+            type="circle",
+            color="#2d6a2d",
+            parent_style={"height": "100%", "width": "100%", "flex": "1", "minHeight": "0"},
         ),
         html.Div(id="landslide-map-info", style={
             "position": "absolute",
@@ -975,6 +1005,10 @@ def map_panel():
             "zIndex": 1000,
             "pointerEvents": "auto",
         }),
+        html.Div([
+            html.Div(className="map-loading-spinner"),
+            html.Span("Wczytuję dane…"),
+        ], id="map-loading-modal", style=LOADING_MODAL_HIDDEN),
     ], style={**PANEL, "flex": "1", "minWidth": "0", "position": "relative"})
 
 
@@ -985,18 +1019,41 @@ def right_panel():
                         style={"color": "#888", "fontStyle": "italic", "padding": "8px"})
     return html.Div([
         ph("Wydzielenie leśne"),
-        html.Div(id="subarea-attrs", children=e_attrs,
-                 style={"padding": "6px 8px", "overflowY": "auto", "flex": "1",
-                        "borderBottom": "1px solid #e0e0e0"}),
+        dcc.Loading(
+            html.Div(id="subarea-attrs", children=e_attrs,
+                     style={"padding": "6px 8px", "overflowY": "auto", "flex": "1",
+                            "borderBottom": "1px solid #e0e0e0"}),
+            type="circle",
+            color="#2d6a2d",
+            parent_style={"display": "flex", "flex": "1", "minHeight": "0"},
+        ),
         ph("Gatunki drzew (piętra)"),
-        html.Div(id="storey-table", children=e_storey,
-                 style={"padding": "4px 6px", "overflowY": "auto", "flex": "1"}),
+        dcc.Loading(
+            html.Div(id="storey-table", children=e_storey,
+                     style={"padding": "4px 6px", "overflowY": "auto", "flex": "1"}),
+            type="circle",
+            color="#2d6a2d",
+            parent_style={"display": "flex", "flex": "1", "minHeight": "0"},
+        ),
     ], style={**PANEL, "width": "320px", "minWidth": "280px", "maxWidth": "360px"})
 
 
 app = dash.Dash(__name__, title="Portal Osuwisk", suppress_callback_exceptions=True)
 
-app.layout = html.Div([
+APP_LOADING_TARGETS = {
+    "landslide-list": "children",
+    "geojson-inspectorate": "data",
+    "geojson-landslides": "data",
+    "geojson-subareas": "data",
+    "geojson-subarea-border": "data",
+    "geojson-zoom": "data",
+    "subarea-attrs": "children",
+    "storey-table": "children",
+    "landslide-map-info": "children",
+}
+
+
+app.layout = dcc.Loading(html.Div([
     html.Div("Portal Osuwisk — Lasy Państwowe", style={
         "background": "#1a4a1a", "color": "#fff", "padding": "6px 16px",
         "fontSize": "15px", "fontWeight": "bold", "flexShrink": "0",
@@ -1017,7 +1074,8 @@ app.layout = html.Div([
     "display": "flex", "flexDirection": "column", "height": "100vh",
     "fontFamily": "'Segoe UI', Arial, sans-serif",
     "margin": "0", "boxSizing": "border-box",
-})
+}), id="app-loading", type="circle", color="#2d6a2d", fullscreen=True,
+    delay_show=200, target_components=APP_LOADING_TARGETS)
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
 
@@ -1091,6 +1149,8 @@ def update_landslide_map_info(landslide_data):
     Output("store-subarea", "data", allow_duplicate=True),
     Input("nadl-dropdown", "value"),
     Input("landslide-filters", "value"),
+    running=[(Output("map-loading-modal", "style", allow_duplicate=True),
+              LOADING_MODAL_VISIBLE, LOADING_MODAL_HIDDEN)],
     prevent_initial_call=True,
 )
 def on_nadl_selected(nadl_name, filters):
@@ -1156,6 +1216,8 @@ def on_nadl_selected(nadl_name, filters):
     Output("storey-table", "children", allow_duplicate=True),
     Input({"type": "landslide-item", "index": ALL}, "n_clicks"),
     State("store-nadl-data", "data"),
+    running=[(Output("map-loading-modal", "style", allow_duplicate=True),
+              LOADING_MODAL_VISIBLE, LOADING_MODAL_HIDDEN)],
     prevent_initial_call=True,
 )
 def on_landslide_clicked(n_clicks_list, nadl_data):
@@ -1214,6 +1276,8 @@ def on_landslide_clicked(n_clicks_list, nadl_data):
     Input("main-map", "clickData"),
     State("store-nadl-data", "data"),
     State("store-landslide", "data"),
+    running=[(Output("map-loading-modal", "style", allow_duplicate=True),
+              LOADING_MODAL_VISIBLE, LOADING_MODAL_HIDDEN)],
     prevent_initial_call=True,
 )
 def on_subarea_clicked(subarea_click_data, map_click_data, nadl_data, landslide_data):
