@@ -93,6 +93,15 @@ def import_osuwiska(engine) -> bool:
     print("  Zapis do PostGIS...")
     gdf.to_postgis("osuwiska_pl", engine, if_exists="replace", index=False)
     with engine.connect() as conn:
+        has_gid = conn.execute(text("""
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = 'osuwiska_pl'
+              AND column_name = 'gid'
+        """)).fetchone()
+        if not has_gid:
+            print("  Brak kolumny gid w źródle — dodaję lokalny identyfikator SERIAL...")
+            conn.execute(text("ALTER TABLE osuwiska_pl ADD COLUMN gid SERIAL"))
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS osuwiska_pl_geom_idx "
             "ON osuwiska_pl USING GIST (geometry)"
