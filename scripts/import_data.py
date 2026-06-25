@@ -97,6 +97,11 @@ def import_osuwiska(engine) -> bool:
             "CREATE INDEX IF NOT EXISTS osuwiska_pl_geom_idx "
             "ON osuwiska_pl USING GIST (geometry)"
         ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS osuwiska_pl_gid_idx "
+            "ON osuwiska_pl (gid)"
+        ))
+        conn.execute(text("ANALYZE osuwiska_pl"))
         conn.commit()
     print(f"  OK — zaimportowano {len(gdf)} obiektów do tabeli osuwiska_pl")
     return True
@@ -129,6 +134,7 @@ def import_g_inspectorate(engine) -> bool:
             "CREATE INDEX IF NOT EXISTS g_inspectorate_geom_idx "
             "ON g_inspectorate USING GIST (geometry)"
         ))
+        conn.execute(text("ANALYZE g_inspectorate"))
         conn.commit()
     print(f"  OK — zaimportowano {len(gdf)} obiektów do tabeli g_inspectorate")
     return True
@@ -244,6 +250,15 @@ def import_bdl(engine) -> bool:
                 "CREATE INDEX IF NOT EXISTS g_subarea_a_i_num_idx "
                 "ON g_subarea (a_i_num)"
             ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS g_subarea_nadl_idx "
+                "ON g_subarea (nadlesnictwo_name)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS g_subarea_nadl_ai_idx "
+                "ON g_subarea (nadlesnictwo_name, a_i_num)"
+            ))
+            conn.execute(text("ANALYZE g_subarea"))
             conn.commit()
 
     if not first_storey:
@@ -252,6 +267,7 @@ def import_bdl(engine) -> bool:
                 "CREATE INDEX IF NOT EXISTS f_storey_species_arodes_idx "
                 "ON f_storey_species (arodes_int_num)"
             ))
+            conn.execute(text("ANALYZE f_storey_species"))
             conn.commit()
 
     print(f"\n  Podsumowanie BDL:")

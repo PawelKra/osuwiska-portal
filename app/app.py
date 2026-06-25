@@ -6,6 +6,8 @@ import os
 import json
 import re
 import math
+import colorsys
+from functools import lru_cache
 
 import dash
 from dash import html, dcc, Input, Output, State, ALL, no_update, ctx
@@ -24,6 +26,11 @@ DB_URL = "postgresql://{user}:{password}@{host}:{port}/{db}".format(
 )
 
 engine = create_engine(DB_URL, pool_pre_ping=True, pool_size=3, max_overflow=5)
+
+APP_DEBUG = os.environ.get("DASH_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
+DEBUG_CLICKS = os.environ.get("DASH_DEBUG_CLICKS", "0").lower() in {"1", "true", "yes", "on"}
+GEOJSON_DECIMALS = int(os.environ.get("GEOJSON_DECIMALS", "6"))
+GEOM_SIMPLIFY_TOLERANCE = float(os.environ.get("GEOM_SIMPLIFY_TOLERANCE", "0.00001"))
 
 # ── Column discovery ─────────────────────────────────────────────────────────
 
@@ -53,25 +60,36 @@ except Exception as _e:
     _osuwiska_cols = []
     COL_AREA = COL_MON = COL_STOP_A = COL_STOP_O = COL_STOP_N = COL_MIAZSZ = None
 
-# ── Ensure gid ───────────────────────────────────────────────────────────────
+# ── Ensure runtime indexes ───────────────────────────────────────────────────
 
 try:
     with engine.connect() as _c:
-        _c.execute(text("""
-            DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='osuwiska_pl' AND column_name='gid'
-                ) THEN
-                    ALTER TABLE osuwiska_pl ADD COLUMN gid SERIAL;
-                    CREATE INDEX osuwiska_pl_gid_idx ON osuwiska_pl (gid);
-                END IF;
-            END $$;
-        """))
+        if _c.execute(text("SELECT to_regclass('public.osuwiska_pl')")).scalar():
+            _c.execute(text("""
+                DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='osuwiska_pl' AND column_name='gid'
+                    ) THEN
+                        ALTER TABLE osuwiska_pl ADD COLUMN gid SERIAL;
+                    END IF;
+                END $$;
+            """))
+            _c.execute(text("CREATE INDEX IF NOT EXISTS osuwiska_pl_gid_idx ON osuwiska_pl (gid)"))
+            _c.execute(text("CREATE INDEX IF NOT EXISTS osuwiska_pl_geom_idx ON osuwiska_pl USING GIST (geometry)"))
+            _c.execute(text("ANALYZE osuwiska_pl"))
+        if _c.execute(text("SELECT to_regclass('public.g_subarea')")).scalar():
+            _c.execute(text("CREATE INDEX IF NOT EXISTS g_subarea_geom_idx ON g_subarea USING GIST (geometry)"))
+            _c.execute(text("CREATE INDEX IF NOT EXISTS g_subarea_nadl_idx ON g_subarea (nadlesnictwo_name)"))
+            _c.execute(text("CREATE INDEX IF NOT EXISTS g_subarea_nadl_ai_idx ON g_subarea (nadlesnictwo_name, a_i_num)"))
+            _c.execute(text("ANALYZE g_subarea"))
+        if _c.execute(text("SELECT to_regclass('public.f_storey_species')")).scalar():
+            _c.execute(text("CREATE INDEX IF NOT EXISTS f_storey_species_arodes_idx ON f_storey_species (arodes_int_num)"))
+            _c.execute(text("ANALYZE f_storey_species"))
         _c.commit()
-    print("[startup] gid column ready on osuwiska_pl")
+    print("[startup] runtime indexes ready")
 except Exception as _e:
-    print(f"[startup] WARNING gid ensure failed: {_e}")
+    print(f"[startup] WARNING runtime index ensure failed: {_e}")
 
 # ── Species colors (LP palette – keys match DB uppercase codes) ───────────────
 
@@ -87,6 +105,7 @@ SPECIES_COLORS = {
     "TP": "#FFE1E1", "OS": "#FFB4B4", "WB": "#FF8787", "LP": "#FF8787",
 }
 DEFAULT_COLOR = "#AAAAAA"
+DEFAULT_ROTATION_AGE = 80
 
 
 def get_species_color(species_cd):
@@ -99,8 +118,73 @@ def get_species_color(species_cd):
     base = sp.split(".")[0]
     return SPECIES_COLORS.get(base, DEFAULT_COLOR)
 
+
+def _hex_to_rgb(hex_color):
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return (170, 170, 170)
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _rgb_to_hex(rgb):
+    return "#{:02X}{:02X}{:02X}".format(*(max(0, min(255, int(v))) for v in rgb))
+
+
+def _mix_hex(hex_color, target, amount):
+    rgb = _hex_to_rgb(hex_color)
+    return _rgb_to_hex([c + (t - c) * amount for c, t in zip(rgb, target)])
+
+
+def _scale_lightness(hex_color, factor):
+    r, g, b = [v / 255 for v in _hex_to_rgb(hex_color)]
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    nr, ng, nb = colorsys.hls_to_rgb(h, max(0, min(1, l * factor)), s)
+    return _rgb_to_hex([nr * 255, ng * 255, nb * 255])
+
+
+def parse_age(value):
+    try:
+        if value is None or pd.isna(value):
+            return None
+        age = float(str(value).strip())
+    except Exception:
+        return None
+    if math.isnan(age):
+        return None
+    return age
+
+
+def get_age_class(spec_age, rotat_age):
+    age = parse_age(spec_age)
+    if age is None:
+        return None
+    rotation = parse_age(rotat_age)
+    if rotation is None or rotation <= 0:
+        rotation = DEFAULT_ROTATION_AGE
+    ratio = age / rotation
+    if ratio <= 1 / 3:
+        return 1
+    if ratio <= 2 / 3:
+        return 2
+    return 3
+
+
+def shade_species_color(species_cd, spec_age, rotat_age=None):
+    base = get_species_color(species_cd)
+    age_class = get_age_class(spec_age, rotat_age)
+    if age_class is None:
+        return base
+
+    # Three age classes relative to rotation age: young, middle-aged, mature.
+    if age_class == 1:
+        return _mix_hex(base, (255, 255, 255), 0.55)
+    if age_class == 2:
+        return base
+    return _scale_lightness(base, 0.78)
+
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
+@lru_cache(maxsize=1)
 def get_nadl_options():
     with engine.connect() as conn:
         df = pd.read_sql(
@@ -110,9 +194,13 @@ def get_nadl_options():
     return [{"label": r, "value": r} for r in df["nadlesnictwo_name"]]
 
 
+@lru_cache(maxsize=128)
 def get_inspectorate_geojson(nadl_name):
     sql = text("""
-        SELECT ST_AsGeoJSON(ST_Transform(gi.geometry, 4326)) AS geojson
+        SELECT ST_AsGeoJSON(
+            ST_SimplifyPreserveTopology(ST_Transform(gi.geometry, 4326), :simplify),
+            :decimals
+        ) AS geojson
         FROM g_inspectorate gi
         WHERE ST_Contains(gi.geometry, (
             SELECT ST_Centroid(ST_Union(s.geometry))
@@ -121,7 +209,10 @@ def get_inspectorate_geojson(nadl_name):
         LIMIT 1
     """)
     with engine.connect() as conn:
-        row = conn.execute(sql, {"nadl": nadl_name}).fetchone()
+        row = conn.execute(
+            sql,
+            {"nadl": nadl_name, "simplify": GEOM_SIMPLIFY_TOLERANCE, "decimals": GEOJSON_DECIMALS},
+        ).fetchone()
     if not row:
         return None
     return {
@@ -130,19 +221,34 @@ def get_inspectorate_geojson(nadl_name):
     }
 
 
-def get_landslides(nadl_name):
+@lru_cache(maxsize=128)
+def _get_landslides_cached(nadl_name):
     opt_parts = [f'o."{c}"' for c in filter(None, [COL_AREA, COL_MON, COL_STOP_A, COL_STOP_O, COL_STOP_N, COL_MIAZSZ])]
     opt_select = (", " + ", ".join(opt_parts)) if opt_parts else ""
 
     sql = text(f"""
         WITH nadl AS (
             SELECT ST_Union(geometry) AS geom FROM g_subarea WHERE nadlesnictwo_name = :nadl
+        ),
+        landslides AS (
+            SELECT
+                o.gid
+                {opt_select},
+                o.geometry,
+                ST_Area(o.geometry) AS area_m2
+            FROM osuwiska_pl o, nadl n
+            WHERE ST_Intersects(o.geometry, n.geom)
+            ORDER BY area_m2 DESC
+            LIMIT 200
         )
         SELECT
             o.gid
             {opt_select},
-            ST_Area(o.geometry)                           AS area_m2,
-            ST_AsGeoJSON(ST_Transform(o.geometry, 4326)) AS geojson_wgs84,
+            o.area_m2,
+            ST_AsGeoJSON(
+                ST_SimplifyPreserveTopology(ST_Transform(o.geometry, 4326), :simplify),
+                :decimals
+            ) AS geojson_wgs84,
             ST_XMin(ST_Transform(o.geometry, 4326))      AS xmin,
             ST_YMin(ST_Transform(o.geometry, 4326))      AS ymin,
             ST_XMax(ST_Transform(o.geometry, 4326))      AS xmax,
@@ -156,16 +262,23 @@ def get_landslides(nadl_name):
                 WHERE ST_Intersects(o.geometry, s.geometry)
                   AND s.nadlesnictwo_name = :nadl
             ), 0) AS forest_pct
-        FROM osuwiska_pl o, nadl n
-        WHERE ST_Intersects(o.geometry, n.geom)
+        FROM landslides o
         ORDER BY area_m2 DESC
-        LIMIT 200
     """)
     with engine.connect() as conn:
-        return pd.read_sql(sql, conn, params={"nadl": nadl_name})
+        return pd.read_sql(
+            sql,
+            conn,
+            params={"nadl": nadl_name, "simplify": GEOM_SIMPLIFY_TOLERANCE, "decimals": GEOJSON_DECIMALS},
+        )
 
 
-def get_landslide_details(landslide_gid, nadl_name):
+def get_landslides(nadl_name):
+    return _get_landslides_cached(nadl_name).copy()
+
+
+@lru_cache(maxsize=512)
+def _get_landslide_details_cached(landslide_gid, nadl_name):
     opt_parts = [f'o."{c}"' for c in filter(None, [COL_AREA, COL_MON, COL_STOP_A, COL_STOP_O, COL_STOP_N, COL_MIAZSZ])]
     opt_select = (", " + ", ".join(opt_parts)) if opt_parts else ""
 
@@ -195,6 +308,10 @@ def get_landslide_details(landslide_gid, nadl_name):
         return pd.read_sql(sql, conn, params={"gid": int(landslide_gid), "nadl": nadl_name})
 
 
+def get_landslide_details(landslide_gid, nadl_name):
+    return _get_landslide_details_cached(int(landslide_gid), nadl_name).copy()
+
+
 def get_landslide_at_point(lat, lng, nadl_name):
     sql = text("""
         WITH pt AS (
@@ -222,11 +339,15 @@ def get_landslide_at_point(lat, lng, nadl_name):
         return pd.read_sql(sql, conn, params={"lat": lat, "lng": lng, "nadl": nadl_name})
 
 
-def get_subareas(landslide_gid, nadl_name):
+@lru_cache(maxsize=512)
+def _get_subareas_cached(landslide_gid, nadl_name):
     sql = text("""
         SELECT
             s.*,
-            ST_AsGeoJSON(ST_Transform(s.geometry, 4326)) AS geojson_wgs84,
+            ST_AsGeoJSON(
+                ST_SimplifyPreserveTopology(ST_Transform(s.geometry, 4326), :simplify),
+                :decimals
+            ) AS geojson_wgs84,
             ST_XMin(ST_Transform(s.geometry, 4326))      AS xmin,
             ST_YMin(ST_Transform(s.geometry, 4326))      AS ymin,
             ST_XMax(ST_Transform(s.geometry, 4326))      AS xmax,
@@ -237,7 +358,20 @@ def get_subareas(landslide_gid, nadl_name):
           AND s.nadlesnictwo_name = :nadl
     """)
     with engine.connect() as conn:
-        return pd.read_sql(sql, conn, params={"gid": int(landslide_gid), "nadl": nadl_name})
+        return pd.read_sql(
+            sql,
+            conn,
+            params={
+                "gid": int(landslide_gid),
+                "nadl": nadl_name,
+                "simplify": GEOM_SIMPLIFY_TOLERANCE,
+                "decimals": GEOJSON_DECIMALS,
+            },
+        )
+
+
+def get_subareas(landslide_gid, nadl_name):
+    return _get_subareas_cached(int(landslide_gid), nadl_name).copy()
 
 
 def get_subarea_at_point(lat, lng, nadl_name):
@@ -277,7 +411,8 @@ def get_subarea_at_point_for_landslide(lat, lng, landslide_gid, nadl_name):
         )
 
 
-def get_subarea_by_a_i_num(a_i_num, nadl_name):
+@lru_cache(maxsize=2048)
+def _get_subarea_by_a_i_num_cached(a_i_num, nadl_name):
     sql = text("""
         SELECT * FROM g_subarea
         WHERE a_i_num = :a_i_num
@@ -286,6 +421,10 @@ def get_subarea_by_a_i_num(a_i_num, nadl_name):
     """)
     with engine.connect() as conn:
         return pd.read_sql(sql, conn, params={"a_i_num": int(a_i_num), "nadl": nadl_name})
+
+
+def get_subarea_by_a_i_num(a_i_num, nadl_name):
+    return _get_subarea_by_a_i_num_cached(int(a_i_num), nadl_name).copy()
 
 
 def latlng_from_click_data(click_data):
@@ -300,7 +439,8 @@ def latlng_from_click_data(click_data):
     return None
 
 
-def get_storey_species(a_i_num):
+@lru_cache(maxsize=4096)
+def _get_storey_species_cached(a_i_num):
     if a_i_num is None or pd.isna(a_i_num):
         return pd.DataFrame()
     sql = text("""
@@ -312,6 +452,12 @@ def get_storey_species(a_i_num):
     """)
     with engine.connect() as conn:
         return pd.read_sql(sql, conn, params={"anum": int(a_i_num)})
+
+
+def get_storey_species(a_i_num):
+    if a_i_num is None or pd.isna(a_i_num):
+        return pd.DataFrame()
+    return _get_storey_species_cached(int(a_i_num)).copy()
 
 
 def bbox_to_geojson_rect(ymin, xmin, ymax, xmax, padding=0.0, token=None):
@@ -354,6 +500,7 @@ def df_to_view(df, padding=0.0):
     return center, zoom
 
 
+@lru_cache(maxsize=128)
 def get_nadl_bbox(nadl_name):
     sql = text("""
         SELECT
@@ -392,7 +539,14 @@ def subareas_to_geojson(df):
     features = []
     for _, row in df.iterrows():
         sp = str(row.get("species_cd") or "").strip().upper() or "_"
-        color = get_species_color(sp)
+        spec_age = row.get("spec_age")
+        if parse_age(spec_age) is None:
+            spec_age = row.get("species_age")
+        rotat_age = row.get("rotat_age")
+        age = parse_age(spec_age)
+        rotation = parse_age(rotat_age) or DEFAULT_ROTATION_AGE
+        age_class = get_age_class(spec_age, rotation)
+        color = shade_species_color(sp, spec_age, rotation)
         features.append({
             "type": "Feature",
             "geometry": json.loads(row["geojson_wgs84"]),
@@ -400,8 +554,11 @@ def subareas_to_geojson(df):
                 "a_i_num": None if pd.isna(row.get("a_i_num")) else int(row.get("a_i_num")),
                 "adr_for": "" if pd.isna(row.get("adr_for")) else str(row.get("adr_for")),
                 "species_cd": sp,
-                "style": {"fillColor": color, "color": "#555",
-                           "weight": 0.8, "fillOpacity": 0.7},
+                "spec_age": None if age is None else int(age),
+                "rotat_age": int(rotation),
+                "age_class": age_class,
+                "style": {"fillColor": color, "color": "#333",
+                           "weight": 0.9, "fillOpacity": 0.92},
             },
         })
     return {"type": "FeatureCollection", "features": features}
@@ -864,30 +1021,31 @@ app.layout = html.Div([
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
 
-app.clientside_callback(
-    """
-    function(subareaClickData, mapClickData) {
-        const ctx = dash_clientside.callback_context;
-        const changed = ctx.triggered.map(t => t.prop_id);
-        if (subareaClickData) {
-            console.log("[dash subarea clickData]", subareaClickData);
+if DEBUG_CLICKS:
+    app.clientside_callback(
+        """
+        function(subareaClickData, mapClickData) {
+            const ctx = dash_clientside.callback_context;
+            const changed = ctx.triggered.map(t => t.prop_id);
+            if (subareaClickData) {
+                console.log("[dash subarea clickData]", subareaClickData);
+            }
+            if (mapClickData) {
+                console.log("[dash map clickData]", mapClickData);
+            }
+            return {
+                changed: changed,
+                subareaClickData: subareaClickData,
+                mapClickData: mapClickData,
+                ts: Date.now()
+            };
         }
-        if (mapClickData) {
-            console.log("[dash map clickData]", mapClickData);
-        }
-        return {
-            changed: changed,
-            subareaClickData: subareaClickData,
-            mapClickData: mapClickData,
-            ts: Date.now()
-        };
-    }
-    """,
-    Output("store-click-debug", "data"),
-    Input("geojson-subareas", "clickData"),
-    Input("main-map", "clickData"),
-    prevent_initial_call=True,
-)
+        """,
+        Output("store-click-debug", "data"),
+        Input("geojson-subareas", "clickData"),
+        Input("main-map", "clickData"),
+        prevent_initial_call=True,
+    )
 
 
 @app.callback(
@@ -1177,8 +1335,8 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=8999,
-        debug=True,
-        dev_tools_hot_reload=True,
+        debug=APP_DEBUG,
+        dev_tools_hot_reload=APP_DEBUG,
         dev_tools_hot_reload_interval=1000,
         dev_tools_hot_reload_watch_interval=500,
     )
